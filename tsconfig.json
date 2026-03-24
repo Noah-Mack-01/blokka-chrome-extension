@@ -1,0 +1,50 @@
+{
+  "compilerOptions": {
+    // Language features
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+
+    // Type checking
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+
+    // Module resolution
+    "baseUrl": ".",
+    "paths": {
+      "@/shared/*": ["src/shared/*"],
+      "@/background/*": ["src/background/*"],
+      "@/popup/*": ["src/popup/*"],
+      "@/content/*": ["src/content/*"]
+    },
+
+    // Emit
+    "declaration": false,
+    "sourceMap": true,
+    "removeComments": false,
+    "skipLibCheck": true,
+
+    // Interop
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "forceConsistentCasingInFileNames": true,
+
+    // Chrome types
+    "types": ["chrome", "bun-types"]
+  },
+  "include": [
+    "src/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
+}
