@@ -1,12 +1,11 @@
 // Background service worker for Network Traffic Interceptor
 // Manages network request interception and rule processing
 
-// Import storage functions (assumes storage.js exports are available)
-// Note: In Manifest V3, we'll use chrome.storage directly as imports aren't supported
-// Storage functions will be called directly from storage.js module
+import { loadRules, saveRules, saveRequest, getRequests } from '../shared/storage';
+import type { Rule, InterceptedRequest, Message, MessageResponse } from '../shared/types';
 
-let rules = [];
-let interceptedRequests = [];
+let rules: Rule[] = [];
+let interceptedRequests: InterceptedRequest[] = [];
 
 // Initialize on service worker startup
 chrome.runtime.onStartup.addListener(async () => {
@@ -21,11 +20,10 @@ chrome.runtime.onInstalled.addListener(async () => {
 /**
  * Initialize rules from storage
  */
-async function initializeRules() {
+async function initializeRules(): Promise<void> {
   try {
-    // Load rules from storage
-    const storedRules = await chrome.storage.local.get(['rules']);
-    rules = storedRules.rules || [];
+    // Load rules from storage using imported function
+    rules = await loadRules();
 
     // Set up web request listeners
     setupWebRequestListeners();
@@ -38,12 +36,12 @@ async function initializeRules() {
 /**
  * Set up web request listeners for network interception
  */
-function setupWebRequestListeners() {
+function setupWebRequestListeners(): void {
   // Listen for requests before they are sent
   chrome.webRequest.onBeforeRequest.addListener(
     (details) => {
-      const interceptedRequest = {
-        id: details.requestId,
+      const interceptedRequest: InterceptedRequest = {
+        id: String(details.requestId),
         url: details.url,
         method: details.method,
         timestamp: Date.now(),
@@ -61,7 +59,7 @@ function setupWebRequestListeners() {
           chrome.runtime.sendMessage({
             type: 'REQUEST_INTERCEPTED',
             payload: interceptedRequest
-          }).catch(() => {
+          } as Message).catch(() => {
             // Ignore errors if no listeners
           });
 
@@ -73,7 +71,7 @@ function setupWebRequestListeners() {
           chrome.runtime.sendMessage({
             type: 'REQUEST_INTERCEPTED',
             payload: interceptedRequest
-          }).catch(() => {});
+          } as Message).catch(() => {});
         }
       }
 
@@ -89,20 +87,20 @@ function setupWebRequestListeners() {
   chrome.webRequest.onCompleted.addListener(
     (details) => {
       // Update the request with response status
-      const requestIndex = interceptedRequests.findIndex(req => req.id === details.requestId);
+      const requestIndex = interceptedRequests.findIndex(req => req.id === String(details.requestId));
       if (requestIndex !== -1) {
         interceptedRequests[requestIndex].status = details.statusCode;
 
-        // Save updated request to storage
-        chrome.storage.local.set({
-          requests: interceptedRequests.slice(-100) // Keep last 100 requests
+        // Update in storage using imported function
+        saveRequest(interceptedRequests[requestIndex]).catch(err => {
+          console.error('Failed to update request status:', err);
         });
 
         // Notify popup/content script
         chrome.runtime.sendMessage({
           type: 'RESPONSE_INTERCEPTED',
           payload: interceptedRequests[requestIndex]
-        }).catch(() => {});
+        } as Message).catch(() => {});
       }
     },
     { urls: ['<all_urls>'] }
@@ -111,12 +109,13 @@ function setupWebRequestListeners() {
   // Listen for errors
   chrome.webRequest.onErrorOccurred.addListener(
     (details) => {
-      const requestIndex = interceptedRequests.findIndex(req => req.id === details.requestId);
+      const requestIndex = interceptedRequests.findIndex(req => req.id === String(details.requestId));
       if (requestIndex !== -1) {
         interceptedRequests[requestIndex].status = -1; // Error status
 
-        chrome.storage.local.set({
-          requests: interceptedRequests.slice(-100)
+        // Update in storage using imported function
+        saveRequest(interceptedRequests[requestIndex]).catch(err => {
+          console.error('Failed to save error status:', err);
         });
       }
     },
@@ -126,10 +125,8 @@ function setupWebRequestListeners() {
 
 /**
  * Find a matching rule for a given URL
- * @param {string} url - The URL to match
- * @returns {Rule|null} - Matching rule or null
  */
-function findMatchingRule(url) {
+function findMatchingRule(url: string): Rule | null {
   for (const rule of rules) {
     if (!rule.enabled) continue;
 
@@ -154,9 +151,8 @@ function findMatchingRule(url) {
 
 /**
  * Save an intercepted request to memory and storage
- * @param {InterceptedRequest} request
  */
-async function saveInterceptedRequest(request) {
+async function saveInterceptedRequest(request: InterceptedRequest): Promise<void> {
   interceptedRequests.push(request);
 
   // Keep only last 100 requests in memory
@@ -164,11 +160,9 @@ async function saveInterceptedRequest(request) {
     interceptedRequests = interceptedRequests.slice(-100);
   }
 
-  // Save to storage
+  // Save to storage using imported function
   try {
-    await chrome.storage.local.set({
-      requests: interceptedRequests
-    });
+    await saveRequest(request);
   } catch (error) {
     console.error('Failed to save request:', error);
   }
@@ -176,23 +170,20 @@ async function saveInterceptedRequest(request) {
 
 /**
  * Get all rules
- * @returns {Promise<Rule[]>}
  */
-async function getRules() {
+async function getRulesInternal(): Promise<Rule[]> {
   return [...rules];
 }
 
 /**
  * Update rules
- * @param {Rule[]} newRules
- * @returns {Promise<void>}
  */
-async function updateRules(newRules) {
+async function updateRulesInternal(newRules: Rule[]): Promise<void> {
   rules = [...newRules];
 
-  // Save to storage
+  // Save to storage using imported function
   try {
-    await chrome.storage.local.set({ rules });
+    await saveRules(rules);
   } catch (error) {
     console.error('Failed to update rules:', error);
     throw error;
@@ -201,13 +192,11 @@ async function updateRules(newRules) {
 
 /**
  * Get intercepted requests
- * @returns {Promise<InterceptedRequest[]>}
  */
-async function getInterceptedRequests() {
-  // Load from storage to get most recent state
+async function getInterceptedRequestsInternal(): Promise<InterceptedRequest[]> {
+  // Load from storage to get most recent state using imported function
   try {
-    const result = await chrome.storage.local.get(['requests']);
-    return result.requests || [];
+    return await getRequests();
   } catch (error) {
     console.error('Failed to get requests:', error);
     return [];
@@ -217,38 +206,44 @@ async function getInterceptedRequests() {
 /**
  * Message listener for communication with popup and content scripts
  */
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  // Handle async responses properly
-  (async () => {
-    try {
-      switch (message.type) {
-        case 'GET_RULES':
-          const currentRules = await getRules();
-          sendResponse({ success: true, data: currentRules });
-          break;
+chrome.runtime.onMessage.addListener(
+  (message: Message, _sender: chrome.runtime.MessageSender, sendResponse: (response: MessageResponse) => void): boolean => {
+    // Handle async responses properly
+    (async () => {
+      try {
+        switch (message.type) {
+          case 'GET_RULES': {
+            const currentRules = await getRulesInternal();
+            sendResponse({ success: true, data: currentRules });
+            break;
+          }
 
-        case 'UPDATE_RULES':
-          await updateRules(message.payload);
-          sendResponse({ success: true });
-          break;
+          case 'UPDATE_RULES': {
+            await updateRulesInternal(message.payload);
+            sendResponse({ success: true });
+            break;
+          }
 
-        case 'GET_REQUESTS':
-          const requests = await getInterceptedRequests();
-          sendResponse({ success: true, data: requests });
-          break;
+          case 'GET_REQUESTS': {
+            const requests = await getInterceptedRequestsInternal();
+            sendResponse({ success: true, data: requests });
+            break;
+          }
 
-        default:
-          sendResponse({ success: false, error: 'Unknown message type' });
+          default: {
+            sendResponse({ success: false, error: 'Unknown message type' });
+          }
+        }
+      } catch (error) {
+        console.error('Error handling message:', error);
+        sendResponse({ success: false, error: (error as Error).message });
       }
-    } catch (error) {
-      console.error('Error handling message:', error);
-      sendResponse({ success: false, error: error.message });
-    }
-  })();
+    })();
 
-  // Return true to indicate async response
-  return true;
-});
+    // Return true to indicate async response
+    return true;
+  }
+);
 
 // Initialize rules when service worker starts
 initializeRules();
