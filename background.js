@@ -1,9 +1,9 @@
 // Background service worker for Network Traffic Interceptor
 // Manages network request interception and rule processing
+/** @typedef {import('./types.d.ts').Rule} Rule */
+/** @typedef {import('./types.d.ts').InterceptedRequest} InterceptedRequest */
 
-// Import storage functions (assumes storage.js exports are available)
-// Note: In Manifest V3, we'll use chrome.storage directly as imports aren't supported
-// Storage functions will be called directly from storage.js module
+import { saveRules, loadRules, saveRequest, getRequests } from './storage.js';
 
 let rules = [];
 let interceptedRequests = [];
@@ -23,9 +23,8 @@ chrome.runtime.onInstalled.addListener(async () => {
  */
 async function initializeRules() {
   try {
-    // Load rules from storage
-    const storedRules = await chrome.storage.local.get(['rules']);
-    rules = storedRules.rules || [];
+    // Load rules from storage using storage.js
+    rules = await loadRules();
 
     // Set up web request listeners
     setupWebRequestListeners();
@@ -93,9 +92,9 @@ function setupWebRequestListeners() {
       if (requestIndex !== -1) {
         interceptedRequests[requestIndex].status = details.statusCode;
 
-        // Save updated request to storage
-        chrome.storage.local.set({
-          requests: interceptedRequests.slice(-100) // Keep last 100 requests
+        // Save updated request to storage using storage.js
+        saveRequest(interceptedRequests[requestIndex]).catch((err) => {
+          console.error('Failed to save completed request:', err);
         });
 
         // Notify popup/content script
@@ -115,8 +114,9 @@ function setupWebRequestListeners() {
       if (requestIndex !== -1) {
         interceptedRequests[requestIndex].status = -1; // Error status
 
-        chrome.storage.local.set({
-          requests: interceptedRequests.slice(-100)
+        // Save updated request to storage using storage.js
+        saveRequest(interceptedRequests[requestIndex]).catch((err) => {
+          console.error('Failed to save errored request:', err);
         });
       }
     },
@@ -164,11 +164,9 @@ async function saveInterceptedRequest(request) {
     interceptedRequests = interceptedRequests.slice(-100);
   }
 
-  // Save to storage
+  // Save to storage using storage.js
   try {
-    await chrome.storage.local.set({
-      requests: interceptedRequests
-    });
+    await saveRequest(request);
   } catch (error) {
     console.error('Failed to save request:', error);
   }
@@ -190,9 +188,9 @@ async function getRules() {
 async function updateRules(newRules) {
   rules = [...newRules];
 
-  // Save to storage
+  // Save to storage using storage.js
   try {
-    await chrome.storage.local.set({ rules });
+    await saveRules(rules);
   } catch (error) {
     console.error('Failed to update rules:', error);
     throw error;
@@ -204,10 +202,9 @@ async function updateRules(newRules) {
  * @returns {Promise<InterceptedRequest[]>}
  */
 async function getInterceptedRequests() {
-  // Load from storage to get most recent state
+  // Load from storage to get most recent state using storage.js
   try {
-    const result = await chrome.storage.local.get(['requests']);
-    return result.requests || [];
+    return await getRequests();
   } catch (error) {
     console.error('Failed to get requests:', error);
     return [];
@@ -217,7 +214,7 @@ async function getInterceptedRequests() {
 /**
  * Message listener for communication with popup and content scripts
  */
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // Handle async responses properly
   (async () => {
     try {
