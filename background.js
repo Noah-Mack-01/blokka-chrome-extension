@@ -6,7 +6,6 @@
 import { saveRules, loadRules, saveRequest, getRequests } from './storage.js';
 
 let rules = [];
-let interceptedRequests = [];
 
 // Initialize on service worker startup
 chrome.runtime.onStartup.addListener(async () => {
@@ -19,15 +18,89 @@ chrome.runtime.onInstalled.addListener(async () => {
 });
 
 /**
- * Initialize rules from storage
+ * Convert a Rule's string id to a positive integer suitable for DNR.
+ * Uses parseInt if the id is numeric, otherwise derives a hash-like value.
+ * @param {string} id
+ * @returns {number}
+ */
+function ruleIdToInt(id) {
+  const parsed = parseInt(id, 10);
+  if (!isNaN(parsed) && parsed > 0) return parsed;
+
+  // Simple hash for non-numeric ids (ensures positive integer)
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) {
+    hash = ((hash << 5) - hash + id.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash) || 1;
+}
+
+/**
+ * Convert internal Rule objects to chrome.declarativeNetRequest rule format.
+ * Only enabled rules are included.
+ * @param {Rule[]} appRules
+ * @returns {chrome.declarativeNetRequest.Rule[]}
+ */
+function toDNRRules(appRules) {
+  return appRules
+    .filter(rule => rule.enabled)
+    .map(rule => {
+      /** @type {chrome.declarativeNetRequest.RuleAction} */
+      let action;
+      if (rule.action === 'block') {
+        action = { type: 'block' };
+      } else if (rule.action === 'allow') {
+        action = { type: 'allow' };
+      } else {
+        // 'modify' — use allow as a safe fallback (actual redirect/modify
+        // would need additional data not present in the Rule interface)
+        action = { type: 'allow' };
+      }
+
+      return {
+        id: ruleIdToInt(rule.id),
+        priority: 1,
+        action,
+        condition: {
+          urlFilter: rule.pattern,
+          resourceTypes: [
+            'main_frame', 'sub_frame', 'stylesheet', 'script', 'image',
+            'font', 'object', 'xmlhttprequest', 'ping', 'csp_report',
+            'media', 'websocket', 'other'
+          ]
+        }
+      };
+    });
+}
+
+/**
+ * Sync the current in-memory rules to chrome.declarativeNetRequest dynamic rules.
+ * Removes all existing dynamic rules first, then adds the new set.
+ */
+async function syncDNRRules() {
+  try {
+    // Retrieve existing dynamic rule IDs so we can remove them
+    const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
+    const removeRuleIds = existingRules.map(r => r.id);
+
+    const addRules = toDNRRules(rules);
+
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds,
+      addRules
+    });
+  } catch (error) {
+    console.error('Failed to sync DNR rules:', error);
+  }
+}
+
+/**
+ * Initialize rules from storage and sync to DNR
  */
 async function initializeRules() {
   try {
-    // Load rules from storage using storage.js
     rules = await loadRules();
-
-    // Set up web request listeners
-    setupWebRequestListeners();
+    await syncDNRRules();
   } catch (error) {
     console.error('Failed to initialize rules:', error);
     rules = [];
@@ -35,135 +108,10 @@ async function initializeRules() {
 }
 
 /**
- * Set up web request listeners for network interception
- */
-function setupWebRequestListeners() {
-  // Listen for requests before they are sent
-  chrome.webRequest.onBeforeRequest.addListener(
-    (details) => {
-      const interceptedRequest = {
-        id: details.requestId,
-        url: details.url,
-        method: details.method,
-        timestamp: Date.now(),
-      };
-
-      // Check if request matches any rules
-      const matchedRule = findMatchingRule(details.url);
-
-      if (matchedRule) {
-        if (matchedRule.action === 'block') {
-          // Save blocked request
-          saveInterceptedRequest(interceptedRequest);
-
-          // Notify popup/content script
-          chrome.runtime.sendMessage({
-            type: 'REQUEST_INTERCEPTED',
-            payload: interceptedRequest
-          }).catch(() => {
-            // Ignore errors if no listeners
-          });
-
-          return { cancel: true };
-        } else if (matchedRule.action === 'modify') {
-          // For now, just log - actual modification would need redirectUrl or other params
-          saveInterceptedRequest(interceptedRequest);
-
-          chrome.runtime.sendMessage({
-            type: 'REQUEST_INTERCEPTED',
-            payload: interceptedRequest
-          }).catch(() => {});
-        }
-      }
-
-      // Allow request (default action)
-      saveInterceptedRequest(interceptedRequest);
-      return { cancel: false };
-    },
-    { urls: ['<all_urls>'] },
-    ['blocking']
-  );
-
-  // Listen for completed responses
-  chrome.webRequest.onCompleted.addListener(
-    (details) => {
-      // Update the request with response status
-      const requestIndex = interceptedRequests.findIndex(req => req.id === details.requestId);
-      if (requestIndex !== -1) {
-        interceptedRequests[requestIndex].status = details.statusCode;
-
-        // Save updated request to storage using storage.js
-        saveRequest(interceptedRequests[requestIndex]).catch((err) => {
-          console.error('Failed to save completed request:', err);
-        });
-
-        // Notify popup/content script
-        chrome.runtime.sendMessage({
-          type: 'RESPONSE_INTERCEPTED',
-          payload: interceptedRequests[requestIndex]
-        }).catch(() => {});
-      }
-    },
-    { urls: ['<all_urls>'] }
-  );
-
-  // Listen for errors
-  chrome.webRequest.onErrorOccurred.addListener(
-    (details) => {
-      const requestIndex = interceptedRequests.findIndex(req => req.id === details.requestId);
-      if (requestIndex !== -1) {
-        interceptedRequests[requestIndex].status = -1; // Error status
-
-        // Save updated request to storage using storage.js
-        saveRequest(interceptedRequests[requestIndex]).catch((err) => {
-          console.error('Failed to save errored request:', err);
-        });
-      }
-    },
-    { urls: ['<all_urls>'] }
-  );
-}
-
-/**
- * Find a matching rule for a given URL
- * @param {string} url - The URL to match
- * @returns {Rule|null} - Matching rule or null
- */
-function findMatchingRule(url) {
-  for (const rule of rules) {
-    if (!rule.enabled) continue;
-
-    try {
-      // Convert simple pattern to regex
-      const pattern = rule.pattern
-        .replace(/\./g, '\\.')
-        .replace(/\*/g, '.*')
-        .replace(/\?/g, '\\?');
-
-      const regex = new RegExp(pattern);
-      if (regex.test(url)) {
-        return rule;
-      }
-    } catch (error) {
-      console.error(`Invalid pattern for rule ${rule.id}:`, error);
-    }
-  }
-
-  return null;
-}
-
-/**
- * Save an intercepted request to memory and storage
+ * Record an intercepted request to in-memory list and persistent storage.
  * @param {InterceptedRequest} request
  */
 async function saveInterceptedRequest(request) {
-  interceptedRequests.push(request);
-
-  // Keep only last 100 requests in memory
-  if (interceptedRequests.length > 100) {
-    interceptedRequests = interceptedRequests.slice(-100);
-  }
-
   // Save to storage using storage.js
   try {
     await saveRequest(request);
@@ -171,6 +119,47 @@ async function saveInterceptedRequest(request) {
     console.error('Failed to save request:', error);
   }
 }
+
+// Observe completed requests via webRequest (read-only, no 'blocking')
+chrome.webRequest.onCompleted.addListener(
+  (details) => {
+    /** @type {InterceptedRequest} */
+    const interceptedRequest = {
+      id: details.requestId,
+      url: details.url,
+      method: details.method,
+      timestamp: Date.now(),
+      status: details.statusCode
+    };
+
+    saveInterceptedRequest(interceptedRequest);
+
+    chrome.runtime.sendMessage({
+      type: 'RESPONSE_INTERCEPTED',
+      payload: interceptedRequest
+    }).catch(() => {
+      // Ignore errors if no listeners
+    });
+  },
+  { urls: ['<all_urls>'] }
+);
+
+// Observe errors
+chrome.webRequest.onErrorOccurred.addListener(
+  (details) => {
+    /** @type {InterceptedRequest} */
+    const interceptedRequest = {
+      id: details.requestId,
+      url: details.url,
+      method: details.method,
+      timestamp: Date.now(),
+      status: -1
+    };
+
+    saveInterceptedRequest(interceptedRequest);
+  },
+  { urls: ['<all_urls>'] }
+);
 
 /**
  * Get all rules
@@ -181,28 +170,28 @@ async function getRules() {
 }
 
 /**
- * Update rules
+ * Update rules — persists to storage AND syncs to chrome.declarativeNetRequest
  * @param {Rule[]} newRules
  * @returns {Promise<void>}
  */
 async function updateRules(newRules) {
   rules = [...newRules];
 
-  // Save to storage using storage.js
   try {
     await saveRules(rules);
   } catch (error) {
-    console.error('Failed to update rules:', error);
+    console.error('Failed to save rules to storage:', error);
     throw error;
   }
+
+  await syncDNRRules();
 }
 
 /**
- * Get intercepted requests
+ * Get intercepted requests from storage
  * @returns {Promise<InterceptedRequest[]>}
  */
 async function getInterceptedRequests() {
-  // Load from storage to get most recent state using storage.js
   try {
     return await getRequests();
   } catch (error) {
@@ -219,20 +208,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
     try {
       switch (message.type) {
-        case 'GET_RULES':
+        case 'GET_RULES': {
           const currentRules = await getRules();
           sendResponse({ success: true, data: currentRules });
           break;
+        }
 
-        case 'UPDATE_RULES':
+        case 'UPDATE_RULES': {
           await updateRules(message.payload);
           sendResponse({ success: true });
           break;
+        }
 
-        case 'GET_REQUESTS':
+        case 'GET_REQUESTS': {
           const requests = await getInterceptedRequests();
           sendResponse({ success: true, data: requests });
           break;
+        }
 
         default:
           sendResponse({ success: false, error: 'Unknown message type' });
@@ -247,5 +239,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return true;
 });
 
-// Initialize rules when service worker starts
+// Initialize rules when service worker starts (top-level await not needed;
+// onInstalled/onStartup listeners cover the cases, but we also call directly
+// so rules are available immediately on first load of the service worker)
 initializeRules();

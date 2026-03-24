@@ -18,14 +18,68 @@ chrome.runtime.onInstalled.addListener(async () => {
 });
 
 /**
- * Initialize rules from storage
+ * Convert a Rule's string id to a positive integer required by declarativeNetRequest.
+ */
+function ruleIdToInt(id: string): number {
+  const parsed = parseInt(id, 10);
+  if (!isNaN(parsed) && parsed > 0) return parsed;
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) {
+    hash = ((hash << 5) - hash + id.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash) || 1;
+}
+
+/**
+ * Convert internal Rule objects to chrome.declarativeNetRequest rule format.
+ * Only enabled rules are included.
+ */
+function toDNRRules(appRules: Rule[]): chrome.declarativeNetRequest.Rule[] {
+  return appRules
+    .filter(rule => rule.enabled)
+    .map(rule => {
+      const action: chrome.declarativeNetRequest.RuleAction =
+        rule.action === 'block'
+          ? { type: 'block' as chrome.declarativeNetRequest.RuleActionType }
+          : { type: 'allow' as chrome.declarativeNetRequest.RuleActionType };
+
+      return {
+        id: ruleIdToInt(rule.id),
+        priority: 1,
+        action,
+        condition: {
+          urlFilter: rule.pattern,
+          resourceTypes: [
+            'main_frame', 'sub_frame', 'stylesheet', 'script', 'image',
+            'font', 'object', 'xmlhttprequest', 'ping', 'csp_report',
+            'media', 'websocket', 'other'
+          ] as chrome.declarativeNetRequest.ResourceType[]
+        }
+      };
+    });
+}
+
+/**
+ * Sync the current in-memory rules to chrome.declarativeNetRequest dynamic rules.
+ */
+async function syncDNRRules(): Promise<void> {
+  try {
+    const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
+    const removeRuleIds = existingRules.map(r => r.id);
+    const addRules = toDNRRules(rules);
+    await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds, addRules });
+  } catch (error) {
+    console.error('Failed to sync DNR rules:', error);
+  }
+}
+
+/**
+ * Initialize rules from storage and sync to declarativeNetRequest.
  */
 async function initializeRules(): Promise<void> {
   try {
-    // Load rules from storage using imported function
     rules = await loadRules();
-
-    // Set up web request listeners
+    await syncDNRRules();
     setupWebRequestListeners();
   } catch (error) {
     console.error('Failed to initialize rules:', error);
@@ -34,86 +88,41 @@ async function initializeRules(): Promise<void> {
 }
 
 /**
- * Set up web request listeners for network interception
+ * Set up read-only webRequest listeners for logging (no 'blocking' — valid in MV3).
  */
 function setupWebRequestListeners(): void {
-  // Listen for requests before they are sent
-  chrome.webRequest.onBeforeRequest.addListener(
+  // Log completed responses
+  chrome.webRequest.onCompleted.addListener(
     (details) => {
       const interceptedRequest: InterceptedRequest = {
         id: String(details.requestId),
         url: details.url,
         method: details.method,
         timestamp: Date.now(),
+        status: details.statusCode,
       };
 
-      // Check if request matches any rules
-      const matchedRule = findMatchingRule(details.url);
-
-      if (matchedRule) {
-        if (matchedRule.action === 'block') {
-          // Save blocked request
-          saveInterceptedRequest(interceptedRequest);
-
-          // Notify popup/content script
-          chrome.runtime.sendMessage({
-            type: 'REQUEST_INTERCEPTED',
-            payload: interceptedRequest
-          } as Message).catch(() => {
-            // Ignore errors if no listeners
-          });
-
-          return { cancel: true };
-        } else if (matchedRule.action === 'modify') {
-          // For now, just log - actual modification would need redirectUrl or other params
-          saveInterceptedRequest(interceptedRequest);
-
-          chrome.runtime.sendMessage({
-            type: 'REQUEST_INTERCEPTED',
-            payload: interceptedRequest
-          } as Message).catch(() => {});
-        }
+      interceptedRequests.push(interceptedRequest);
+      if (interceptedRequests.length > 100) {
+        interceptedRequests = interceptedRequests.slice(-100);
       }
 
-      // Allow request (default action)
       saveInterceptedRequest(interceptedRequest);
-      return { cancel: false };
-    },
-    { urls: ['<all_urls>'] },
-    ['blocking']
-  );
 
-  // Listen for completed responses
-  chrome.webRequest.onCompleted.addListener(
-    (details) => {
-      // Update the request with response status
-      const requestIndex = interceptedRequests.findIndex(req => req.id === String(details.requestId));
-      if (requestIndex !== -1) {
-        interceptedRequests[requestIndex].status = details.statusCode;
-
-        // Update in storage using imported function
-        saveRequest(interceptedRequests[requestIndex]).catch(err => {
-          console.error('Failed to update request status:', err);
-        });
-
-        // Notify popup/content script
-        chrome.runtime.sendMessage({
-          type: 'RESPONSE_INTERCEPTED',
-          payload: interceptedRequests[requestIndex]
-        } as Message).catch(() => {});
-      }
+      chrome.runtime.sendMessage({
+        type: 'RESPONSE_INTERCEPTED',
+        payload: interceptedRequest
+      } as Message).catch(() => {});
     },
     { urls: ['<all_urls>'] }
   );
 
-  // Listen for errors
+  // Log errors
   chrome.webRequest.onErrorOccurred.addListener(
     (details) => {
       const requestIndex = interceptedRequests.findIndex(req => req.id === String(details.requestId));
       if (requestIndex !== -1) {
-        interceptedRequests[requestIndex].status = -1; // Error status
-
-        // Update in storage using imported function
+        interceptedRequests[requestIndex].status = -1;
         saveRequest(interceptedRequests[requestIndex]).catch(err => {
           console.error('Failed to save error status:', err);
         });
@@ -121,32 +130,6 @@ function setupWebRequestListeners(): void {
     },
     { urls: ['<all_urls>'] }
   );
-}
-
-/**
- * Find a matching rule for a given URL
- */
-function findMatchingRule(url: string): Rule | null {
-  for (const rule of rules) {
-    if (!rule.enabled) continue;
-
-    try {
-      // Convert simple pattern to regex
-      const pattern = rule.pattern
-        .replace(/\./g, '\\.')
-        .replace(/\*/g, '.*')
-        .replace(/\?/g, '\\?');
-
-      const regex = new RegExp(pattern);
-      if (regex.test(url)) {
-        return rule;
-      }
-    } catch (error) {
-      console.error(`Invalid pattern for rule ${rule.id}:`, error);
-    }
-  }
-
-  return null;
 }
 
 /**
@@ -176,18 +159,19 @@ async function getRulesInternal(): Promise<Rule[]> {
 }
 
 /**
- * Update rules
+ * Update rules — persists to storage AND syncs to declarativeNetRequest.
  */
 async function updateRulesInternal(newRules: Rule[]): Promise<void> {
   rules = [...newRules];
 
-  // Save to storage using imported function
   try {
     await saveRules(rules);
   } catch (error) {
     console.error('Failed to update rules:', error);
     throw error;
   }
+
+  await syncDNRRules();
 }
 
 /**
