@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { copyFileSync, mkdirSync, existsSync } from 'fs';
+import { copyFileSync, mkdirSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 
 const isWatch = process.argv.includes('--watch');
@@ -62,7 +62,9 @@ async function build() {
     // Copy icons if they exist
     if (existsSync('icons')) {
       mkdirSync(join(dist, 'icons'), { recursive: true });
-      // Icons will be copied when they exist
+      for (const file of readdirSync('icons')) {
+        copyFileSync(join('icons', file), join(dist, 'icons', file));
+      }
     }
 
     console.log('✓ Build complete!');
