@@ -6,10 +6,9 @@
   "description": "Chrome extension to intercept and monitor network traffic",
   "permissions": [
     "webRequest",
-    "webRequestBlocking",
     "declarativeNetRequest",
-    "storage",
-    "<all_urls>"
+    "declarativeNetRequestWithHostAccess",
+    "storage"
   ],
   "host_permissions": [
     "<all_urls>"
