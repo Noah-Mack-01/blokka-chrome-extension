@@ -173,19 +173,29 @@ function renderRules(): void {
       <div class="rule-item ${disabledClass}" data-rule-id="${rule.id}">
         <div class="rule-toggle">
           <input type="checkbox" ${rule.enabled ? 'checked' : ''}
-                 onchange="toggleRule('${rule.id}')" />
+                 data-action="toggle" data-rule-id="${rule.id}" />
         </div>
         <div class="rule-content">
           <div class="rule-pattern">${escapeHtml(rule.pattern)}</div>
           <span class="rule-action ${actionClass}">${rule.action}</span>
         </div>
         <div class="rule-actions">
-          <button class="btn btn-small btn-secondary" onclick="editRule('${rule.id}')">Edit</button>
-          <button class="btn btn-small btn-danger" onclick="deleteRule('${rule.id}')">Delete</button>
+          <button class="btn btn-small btn-secondary" data-action="edit" data-rule-id="${rule.id}">Edit</button>
+          <button class="btn btn-small btn-danger" data-action="delete" data-rule-id="${rule.id}">Delete</button>
         </div>
       </div>
     `;
   }).join('');
+
+  rulesList.querySelectorAll<HTMLInputElement>('input[data-action="toggle"]').forEach(el => {
+    el.addEventListener('change', () => toggleRule(el.dataset.ruleId!));
+  });
+  rulesList.querySelectorAll<HTMLButtonElement>('button[data-action="edit"]').forEach(el => {
+    el.addEventListener('click', () => editRule(el.dataset.ruleId!));
+  });
+  rulesList.querySelectorAll<HTMLButtonElement>('button[data-action="delete"]').forEach(el => {
+    el.addEventListener('click', () => deleteRule(el.dataset.ruleId!));
+  });
 }
 
 /**
@@ -356,16 +366,3 @@ function escapeHtml(text: string): string {
   return div.innerHTML;
 }
 
-// Expose functions to window for inline onclick handlers in HTML
-// TypeScript will properly type these
-declare global {
-  interface Window {
-    toggleRule: (ruleId: string) => Promise<void>;
-    editRule: (ruleId: string) => void;
-    deleteRule: (ruleId: string) => Promise<void>;
-  }
-}
-
-window.toggleRule = toggleRule;
-window.editRule = editRule;
-window.deleteRule = deleteRule;

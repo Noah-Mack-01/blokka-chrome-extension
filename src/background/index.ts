@@ -21,13 +21,11 @@ chrome.runtime.onInstalled.addListener(async () => {
  * Convert a Rule's string id to a positive integer required by declarativeNetRequest.
  */
 function ruleIdToInt(id: string): number {
-  const parsed = parseInt(id, 10);
-  if (!isNaN(parsed) && parsed > 0) return parsed;
   let hash = 0;
   for (let i = 0; i < id.length; i++) {
     hash = ((hash << 5) - hash + id.charCodeAt(i)) | 0;
   }
-  return Math.abs(hash) || 1;
+  return (Math.abs(hash) % 2147483646) + 1;
 }
 
 /**
